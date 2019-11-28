@@ -28,6 +28,7 @@
 #define WE  23
 #define CE  16
 #define OE  18
+#define LED 13
 
 // Teensy pin mapping of address/data bus starting from the LSB
 int address_pins[] = { 10,9,8,7,6,5,4,3,19,36,17,35,2,20,21,1,0 };
@@ -124,7 +125,7 @@ void device_command(byte command) {
 void identify_device(void) {
   byte family, device;
 
-  digitalWrite(13, HIGH);           // LED indicator that something is happening
+  digitalWrite(LED, HIGH);           // LED indicator that something is happening
  
   device_command(0x90);
   tristate_data_pins();
@@ -152,8 +153,11 @@ void identify_device(void) {
   // Exit product ID read mode
   device_command(0xF0);
   delayMicroseconds(10);            // T(IDA)
-
-  digitalWrite(13, LOW);
+  digitalWrite(CE, LOW);
+  delayMicroseconds(10);            // unspecified delay
+  digitalWrite(CE, HIGH);           // return to idle state (not shown in timing diagram)
+  
+  digitalWrite(LED, LOW);
 
   Serial.print("Device ID is ");
   Serial.print(family, HEX);
@@ -163,19 +167,82 @@ void identify_device(void) {
 }
 
 
-void verify(void) {
+// Erase the entire chip
+void erase_device(void) {
+  digitalWrite(LED, HIGH);
+  device_command(0x80);
+  device_command(0x10);
+  delay(20);      // T(SCE)
+  Serial.println("Device erased.");
+  digitalWrite(LED, LOW);
+}
+
+
+// Program the device. This device uses page writes, so the writes are
+// divided up into blocks of 128, with a wait for completion after each
+// block is written.
+void program_device(void) {
+  unsigned long block_address;
+  int buffer[128];
+  int i;
+
+  imagefile.seek(0);  // rewind
+
+  Serial.println("Programming ...");
+
+  for (block_address=0; block_address < 0x20000; block_address += 128) {
+
+    // Read the file can interfere with the block timing. Read the whole
+    // block first into a buffer, then program from there.
+    for (i=0; i < 128; i++) {
+      buffer[i] = imagefile.read();
+      if (buffer[i] == -1) {
+        Serial.print("\nError reading image file at address 0x");
+        Serial.println(block_address+i, HEX);
+        Serial.println("Aborting programming operation.");
+        digitalWrite(LED, LOW);
+        return;
+      }
+    }
+    
+    device_command(0xA0);     // software data protect write command
+
+    digitalWrite(LED, HIGH);
+
+    for (i=0; i < 128; i++) {
+      bus_write_cycle(block_address+i, buffer[i]);
+    }
+
+    delayMicroseconds(200);     // T(BLCO)
+
+    // Toggle Bit Polling method:
+    // Keep reading the last address written until it comes back twice the same.
+    // Only bit 6 is toggling, but it's easy to compare the whole byte.
+    while (bus_read_cycle(block_address+127) != bus_read_cycle(block_address+127));
+
+    digitalWrite(LED, LOW);
+  }
+
+  Serial.println("Programming complete!");
+}
+
+
+// Verify the device has been programmed successfully.
+void verify_device(void) {
   unsigned long addr;
   int error_count = 0;
   int image_byte, device_byte;
 
   imagefile.seek(0);      // rewind to the top of the file
 
+  digitalWrite(LED, HIGH);
   for (addr=0; addr < 0x20000; addr++) {
     device_byte = bus_read_cycle(addr);
     image_byte = imagefile.read();
 
     if (image_byte == -1) {
       Serial.println("Error reading image file for verify");
+      digitalWrite(LED, LOW);
       return;
     }
 
@@ -191,10 +258,12 @@ void verify(void) {
 
     if (error_count > 10) {
       Serial.println("Too many errors, aborting verify.");
+      digitalWrite(LED, LOW);
       return;
     }
   }
 
+  digitalWrite(LED, LOW);
   if (error_count == 0) {
     Serial.println("Device verified successfully!");
   }
@@ -232,11 +301,15 @@ void setup() {
 
 // Standard Arduino loop function. Called repeatedly, forever.
 void loop() {    
-  Serial.println("\n\nHit Enter to check device ID.");
-  
+  Serial.println("\nHit Enter to check device ID.");
   while (Serial.read() != '\n');
 
   identify_device();
+
+  Serial.println("\nHit Enter to erase the device.");
+  while (Serial.read() != '\n');
+
+  erase_device();
 
   // Make sure we have the image file
   imagefile = sd.open(filename, FILE_READ);
@@ -247,15 +320,15 @@ void loop() {
     return; // loop back and try again
   }
 
-  Serial.println("\n\nHit Enter to program device.");
+  Serial.println("\nHit Enter to program device.");
   while (Serial.read() != '\n');
 
-  Serial.println("Not implemented yet.");
-
-  Serial.println("\n\nHit Enter to verify device.");
+  program_device();
+  
+  Serial.println("\nHit Enter to verify device.");
   while (Serial.read() != '\n');
 
-  verify();
+  verify_device();
 
   imagefile.close();
   // Loop back and prompt the user for another device
