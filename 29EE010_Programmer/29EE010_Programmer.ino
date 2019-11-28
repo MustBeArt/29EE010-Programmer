@@ -112,15 +112,21 @@ void bus_write_cycle(unsigned long address, byte value) {
 }
 
 
+// Send a command to the device
+void device_command(byte command) {
+  bus_write_cycle(0x5555, 0xAA);
+  bus_write_cycle(0x2AAA, 0x55);
+  bus_write_cycle(0x5555, command);
+}
+
+
 // Try to read the device ID and print it to the console
 void identify_device(void) {
   byte family, device;
 
   digitalWrite(13, HIGH);           // LED indicator that something is happening
  
-  bus_write_cycle(0x5555, 0xAA);
-  bus_write_cycle(0x2AAA, 0x55);
-  bus_write_cycle(0x5555, 0x90);
+  device_command(0x90);
   tristate_data_pins();
   set_address(0x0000);
 
@@ -144,9 +150,7 @@ void identify_device(void) {
   digitalWrite(CE, HIGH);
 
   // Exit product ID read mode
-  bus_write_cycle(0x5555, 0xAA);
-  bus_write_cycle(0x2AAA, 0x55);
-  bus_write_cycle(0x5555, 0xF0);
+  device_command(0xF0);
   delayMicroseconds(10);            // T(IDA)
 
   digitalWrite(13, LOW);
@@ -159,10 +163,48 @@ void identify_device(void) {
 }
 
 
+void verify(void) {
+  unsigned long addr;
+  int error_count = 0;
+  int image_byte, device_byte;
+
+  imagefile.seek(0);      // rewind to the top of the file
+
+  for (addr=0; addr < 0x20000; addr++) {
+    device_byte = bus_read_cycle(addr);
+    image_byte = imagefile.read();
+
+    if (image_byte == -1) {
+      Serial.println("Error reading image file for verify");
+      return;
+    }
+
+    if (device_byte != image_byte) {
+      Serial.print("Verify error at address 0x");
+      Serial.print(addr, HEX);
+      Serial.print(". Device contains 0x");
+      Serial.print(device_byte, HEX);
+      Serial.print(", should be 0x");
+      Serial.println(image_byte, HEX);
+      error_count++;
+    }
+
+    if (error_count > 10) {
+      Serial.println("Too many errors, aborting verify.");
+      return;
+    }
+  }
+
+  if (error_count == 0) {
+    Serial.println("Device verified successfully!");
+  }
+}
+
+
 // Standard Arduino setup routine, runs once on powerup
 void setup() {
 
-  delay(1000);              // This seems necessary, but why?
+  delay(2000);              // This seems necessary, but why?
   
   Serial.begin(9600);       // We will interact with the user on the USB serial port
   Serial.println("GLS29EE010 Programmer 0.1");
@@ -213,7 +255,7 @@ void loop() {
   Serial.println("\n\nHit Enter to verify device.");
   while (Serial.read() != '\n');
 
-  Serial.println("Not implemented yet.");
+  verify();
 
   imagefile.close();
   // Loop back and prompt the user for another device
